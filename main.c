@@ -9,6 +9,10 @@
  *   hello_bench  SHA-256 CPU benchmark inside the sandbox
  *   hello_count  persistent counter in the app's key-value store
  *   hello_loop   infinite loop: must be stopped by the call budget without hanging the agent
+ *   hello_greet  greets with the "greeting" setting (/app config hello greeting Servus)
+ *   hello_timer  starts (interval_s >= 60) or stops (0) the timer; on_timer counts ticks and, with
+ *                the "tick_notify" setting on, sends a Telegram message per tick
+ *   hello_notify sends a Telegram message to the device's users
  */
 #define CLAW_ARENA_SIZE 4096
 #include "claw.h"
@@ -20,6 +24,9 @@ static int32_t s_echo = -1;
 static int32_t s_bench = -1;
 static int32_t s_count = -1;
 static int32_t s_loop = -1;
+static int32_t s_greet = -1;
+static int32_t s_timer = -1;
+static int32_t s_notify = -1;
 static char s_out[CLAW_ARENA_SIZE + 64];
 
 CLAW_EXPORT("app_init") void app_init(void)
@@ -33,6 +40,15 @@ CLAW_EXPORT("app_init") void app_init(void)
                             "{\"type\":\"object\",\"properties\":{\"reset\":{\"type\":\"boolean\"}}}");
     s_loop = CLAW_REGISTER("loop", "Runaway test: spins forever; the device must stop it after the call budget.",
                            "{\"type\":\"object\",\"properties\":{}}");
+    s_greet = CLAW_REGISTER("greet", "Greet someone with the configured greeting (WASM app settings demo).",
+                            "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}}}");
+    s_timer = CLAW_REGISTER("timer", "Start the hello timer every interval_s seconds (>= 60), or stop it with 0. "
+                            "Returns the tick count so far.",
+                            "{\"type\":\"object\",\"properties\":{\"interval_s\":{\"type\":\"integer\"}},"
+                            "\"required\":[\"interval_s\"]}");
+    s_notify = CLAW_REGISTER("notify", "Send a Telegram message to the device's users (WASM app notify demo).",
+                             "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},"
+                             "\"required\":[\"text\"]}");
     CLAW_LOG(CLAW_LOG_INFO, "hello app initialised");
 }
 
@@ -152,6 +168,72 @@ static void tool_count(const char *args, const char *end)
     claw_tool_result(b.buf, b.len);
 }
 
+static void tool_greet(const char *args, const char *end)
+{
+    claw_buf_t b = { s_out, sizeof(s_out), 0, 0 };
+    char greeting[257];
+    char name[128];
+    char token[257];
+    int32_t g = claw_config_get(CLAW_S("greeting"), greeting, sizeof(greeting));
+    int32_t n = cj_string(cj_member(args, end, "name"), end, name, sizeof(name));
+    /* A secret setting is only reported as set/unset: tool results go to the LLM. */
+    int32_t t = claw_config_get(CLAW_S("token"), token, sizeof(token));
+
+    cb_put(&b, "{\"text\":\"");
+    cb_put_escaped(&b, g > 0 ? greeting : "Hello", g > 0 ? (uint32_t)g : 5);
+    cb_put(&b, ", ");
+    cb_put_escaped(&b, n > 0 ? name : "world", n > 0 ? (uint32_t)n : 5);
+    cb_put(&b, t >= 0 ? "!\",\"token\":\"set\"}" : "!\",\"token\":\"unset\"}");
+    claw_tool_result(b.buf, b.len);
+}
+
+static uint32_t ticks(void)
+{
+    uint32_t count = 0;
+
+    return claw_kv_get(CLAW_S("ticks"), &count, sizeof(count)) == (int32_t)sizeof(count) ? count : 0;
+}
+
+static void tool_timer(const char *args, const char *end)
+{
+    claw_buf_t b = { s_out, sizeof(s_out), 0, 0 };
+    int64_t interval = cj_uint(cj_member(args, end, "interval_s"), end);
+    int32_t rc = interval < 0 || interval > 0x7fffffff ? -CLAW_EINVAL : claw_timer_set((int32_t)interval);
+
+    cb_put(&b, rc == 0 ? (interval ? "{\"timer\":\"started\"" : "{\"timer\":\"stopped\"") :
+           rc == -CLAW_ENOSPC ? "{\"error\":\"too many app timers\"" : "{\"error\":\"interval_s must be 0 or 60-604800\"");
+    cb_put(&b, ",\"ticks\":");
+    cb_put_u32(&b, ticks());
+    cb_put(&b, "}");
+    claw_tool_result(b.buf, b.len);
+}
+
+static void tool_notify(const char *args, const char *end)
+{
+    char text[1001];
+    int32_t n = cj_string(cj_member(args, end, "text"), end, text, sizeof(text));
+    int32_t rc = n > 0 ? claw_notify(text, (uint32_t)n) : -CLAW_EINVAL;
+
+    CLAW_RESULT(rc == 0 ? "{\"sent\":true}" : rc == -CLAW_ENOSPC ? "{\"error\":\"hourly limit reached\"}" :
+                rc == -CLAW_ENOTSUP ? "{\"error\":\"no Telegram\"}" : "{\"error\":\"notify failed\"}");
+}
+
+/* Runs every claw_timer_set() interval, also after a reboot or idle unload. */
+CLAW_EXPORT("on_timer") void on_timer(void)
+{
+    claw_buf_t b = { s_out, sizeof(s_out), 0, 0 };
+    uint32_t count = ticks() + 1;
+    char flag[8];
+
+    claw_kv_set(CLAW_S("ticks"), &count, sizeof(count));
+    cb_put(&b, "tick ");
+    cb_put_u32(&b, count);
+    claw_log(CLAW_LOG_INFO, b.buf, b.len);
+    if (claw_config_get(CLAW_S("tick_notify"), flag, sizeof(flag)) == 4) { /* "true" */
+        claw_notify(b.buf, b.len);
+    }
+}
+
 CLAW_EXPORT("tool_call") int32_t tool_call(int32_t tool, const char *args, uint32_t len)
 {
     const char *end = args + len;
@@ -162,6 +244,12 @@ CLAW_EXPORT("tool_call") int32_t tool_call(int32_t tool, const char *args, uint3
         tool_bench(args, end);
     } else if (tool == s_count) {
         tool_count(args, end);
+    } else if (tool == s_greet) {
+        tool_greet(args, end);
+    } else if (tool == s_timer) {
+        tool_timer(args, end);
+    } else if (tool == s_notify) {
+        tool_notify(args, end);
     } else if (tool == s_loop) {
         CLAW_LOG(CLAW_LOG_WARN, "hello_loop: spinning until the host stops me");
         for (volatile uint32_t i = 0;; i++) {

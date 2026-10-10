@@ -4,6 +4,12 @@ Example esp-claw WASM app: echo, benchmark, key-value demo and a runaway-protect
 
 A minimal app that shows how to register tools, return results and use the per-app key-value store. Its `loop` tool runs forever on purpose, to test that the runtime aborts runaway calls.
 
+It also exercises settings, timers and notifications (needs firmware with host API `config_get`, `timer_set` and `notify`):
+
+- `hello_greet` greets with the `greeting` setting and reports whether the secret `token` is set (never its value). Try `/app config hello`, `/app config hello greeting Servus` and `/app config hello token abc`.
+- `hello_timer` starts the timer (`interval_s` >= 60) or stops it (0). `on_timer` counts ticks in the key-value store; with `/app config hello tick_notify on` every tick also sends a Telegram message. `/apps` shows the timer.
+- `hello_notify` sends a Telegram message (at most 10 per hour).
+
 ## Build
 
 ```sh

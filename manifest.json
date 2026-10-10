@@ -1,13 +1,20 @@
 {
   "name": "hello",
-  "version": "1.0.0",
-  "description": "Demo and runtime test app: echo, benchmark, persistent counter, runaway loop.",
+  "version": "1.1.0",
+  "description": "Demo and runtime test app: echo, benchmark, counter, runaway loop, settings, timer, notify.",
   "permissions": {
     "log": true,
-    "kv": true
+    "kv": true,
+    "notify": true,
+    "timer": { "min_interval_s": 60 }
   },
   "limits": {
     "memory_kb": 64,
     "call_timeout_ms": 5000
-  }
+  },
+  "settings": [
+    { "key": "greeting", "type": "string", "default": "Hello", "description": "Greeting used by hello_greet" },
+    { "key": "tick_notify", "type": "bool", "default": false, "description": "Send a Telegram message on every timer tick" },
+    { "key": "token", "type": "string", "secret": true, "description": "Secret test value (only its presence is reported)" }
+  ]
 }
